@@ -1,0 +1,229 @@
+# COBOL to FastAPI Migration Pipeline
+
+A linear multi-agent pipeline (Analyst → Architect → Developer) that converts COBOL programs to FastAPI microservices using LLMs via LangChain LCEL.
+
+## Architecture
+
+```
+┌─────────────┐     ┌──────────────┐     ┌────────────────┐     ┌──────────────────┐
+│   COBOL     │────▶│  Analyst     │────▶│   Architect    │────▶│  Developer       │
+│   Source    │     │  (Agent 1)   │     │  (Agent 2)     │     │  (Agent 3)       │
+└─────────────┘     └──────────────┘     └────────────────┘     └──────────────────┘
+                         │                    │                        │
+                         ▼                    ▼                        ▼
+                  business_rules.json    pydantic_schema.py      fastapi_app/
+```
+
+### Agent Roles
+
+1. **Analyst** - Reads COBOL, extracts structured business rules (data definitions, logic, I/O)
+2. **Architect** - Converts business rules to Pydantic models with proper types, enums, validation
+3. **Developer** - Generates complete FastAPI application (routes, services, models, main)
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.10+
+- Groq API key (free at [console.groq.com](https://console.groq.com/keys))
+
+### Installation
+
+```bash
+# Clone and enter project
+cd cobol
+
+# Install dependencies
+pip install -e ".[dev]"
+
+# Or with uv (faster)
+uv pip install -e ".[dev]"
+
+# Copy environment template
+cp .env.example .env
+# Edit .env with your GROQ_API_KEY
+```
+
+### Usage
+
+```bash
+# Migrate a COBOL file to FastAPI
+python -m src.pipeline.runner migrate examples/sample.cbl -o ./output
+
+# Preview extracted COBOL sections
+python -m src.pipeline.runner preview examples/sample.cbl
+
+# Test Groq API connectivity
+python -m src.pipeline.runner test-groq
+```
+
+### Generated Output
+
+```
+output/
+├── main.py              # FastAPI app entry point
+├── models.py            # Pydantic models
+├── services.py          # Business logic layer
+├── routes.py            # API routes
+├── requirements.txt     # Dependencies
+├── README.md            # API documentation
+└── intermediates/       # Debug: agent outputs
+    ├── 01_extracted_sections.json
+    ├── 02_business_rules.json
+    ├── 03_pydantic_schema.json
+    └── 04_fastapi_output.json
+```
+
+### Run the Generated API
+
+```bash
+cd output
+pip install -r requirements.txt
+uvicorn main:app --reload
+```
+
+Visit http://localhost:8000/docs for Swagger UI.
+
+## Configuration
+
+Environment variables (`.env`):
+
+```env
+GROQ_API_KEY=your_key_here
+GROQ_MODEL=llama-3.1-70b-versatile  # or mixtral-8x7b-32768, llama-3.1-8b-instant
+GROQ_TEMPERATURE=0.1
+GROQ_MAX_TOKENS=8192
+```
+
+## COBOL Support (MVP)
+
+Currently supports:
+- ✅ WORKING-STORAGE SECTION (data definitions)
+- ✅ PROCEDURE DIVISION (paragraphs, logic)
+- ✅ PICTURE clauses (9, X, V, COMP, COMP-3)
+- ✅ VALUE, OCCURS, REDEFINES
+- ✅ 88-level condition names
+- ✅ IF/ELSE/END-IF conditions
+- ✅ PERFORM, MOVE, COMPUTE, ADD/SUBTRACT
+- ✅ DISPLAY, ACCEPT I/O
+
+Not yet supported:
+- ❌ COPY statements (copybooks)
+- ❌ CALL to external programs
+- ❌ CICS/BMS screens
+- ❌ Embedded SQL (EXEC SQL)
+- ❌ FILE SECTION (sequential files)
+- ❌ Complex TABLE/SEARCH
+
+## Project Structure
+
+```
+cobol/
+├── src/
+│   ├── pipeline/           # Multi-agent pipeline
+│   │   ├── chain.py        # LCEL chain composition
+│   │   ├── models.py       # Pydantic models for inter-agent data
+│   │   ├── prompts.py      # Prompt templates for each agent
+│   │   ├── parsers.py      # Output parsers
+│   │   └── runner.py       # CLI entry point
+│   ├── cobol/              # COBOL parsing
+│   │   ├── extractor.py    # Section extraction (regex-based)
+│   │   └── parser.py       # Structured parsing
+│   └── fastapi/            # FastAPI templates
+│       └── template.py     # Code templates
+├── tests/
+│   ├── test_cobol_parser.py
+│   └── test_pipeline.py
+├── examples/
+│   └── sample.cbl          # Sample COBOL program
+├── pyproject.toml
+├── .env.example
+└── README.md
+```
+
+## Development
+
+### Run Tests
+
+```bash
+# All tests
+pytest
+
+# Specific test file
+pytest tests/test_cobol_parser.py -v
+
+# With coverage
+pytest --cov=src
+```
+
+### Code Quality
+
+```bash
+# Lint
+ruff check src/
+
+# Format
+ruff format src/
+
+# Type check
+mypy src/
+```
+
+## Pipeline Details
+
+### Agent 1: Analyst Prompt
+
+Extracts:
+- All data fields with full metadata (level, picture, usage, value, occurs, redefines)
+- 88-level condition names
+- Business rules from each paragraph (type, conditions, actions)
+- I/O operations (DISPLAY, ACCEPT, READ, WRITE)
+- Paragraph inventory
+
+### Agent 2: Architect Prompt
+
+Generates:
+- Pydantic models preserving COBOL hierarchy
+- Enums for 88-level conditions
+- Proper type mapping (PIC 9→int, PIC 9V99→Decimal, PIC X→str)
+- List[T] for OCCURS
+- Union/validation for REDEFINES
+- Field descriptions from COBOL context
+
+### Agent 3: Developer Prompt
+
+Generates:
+- `main.py` - FastAPI app with lifespan, CORS, health check
+- `models.py` - Pydantic models (copied from Architect)
+- `services.py` - Service layer with DI, CRUD, business methods
+- `routes.py` - RESTful endpoints with validation, pagination
+- `requirements.txt` - Pinned dependencies
+- `README.md` - API documentation
+
+## Extending the Pipeline
+
+### Add New COBOL Constructs
+
+1. Update `src/cobol/extractor.py` to extract new sections
+2. Update `src/cobol/parser.py` to parse new constructs
+3. Update `src/pipeline/prompts.py` Analyst prompt to recognize new patterns
+4. Update Architect prompt to generate appropriate Pydantic code
+
+### Customize FastAPI Output
+
+Modify templates in `src/fastapi/template.py` or update the Developer prompt.
+
+### Use Different LLM
+
+The pipeline uses LangChain's `ChatGroq`. To use another provider:
+
+```python
+# In chain.py get_llm()
+from langchain_openai import ChatOpenAI
+# or
+from langchain_anthropic import ChatAnthropic
+```
+
+## License
+
+MIT

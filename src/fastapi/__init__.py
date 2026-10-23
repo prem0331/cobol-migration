@@ -1,0 +1,9 @@
+"""FastAPI templates and utilities."""
+
+from .template import FASTAPI_MAIN_TEMPLATE, FASTAPI_SERVICE_TEMPLATE, FASTAPI_ROUTES_TEMPLATE
+
+__all__ = [
+    "FASTAPI_MAIN_TEMPLATE",
+    "FASTAPI_SERVICE_TEMPLATE",
+    "FASTAPI_ROUTES_TEMPLATE",
+]

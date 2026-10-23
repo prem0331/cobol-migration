@@ -1,0 +1,23 @@
+
+# Secrets
+.env
+.env.*
+
+# Keep the example environment template
+!.env.example
+
+# Generated migration outputs
+output/
+output_test/
+output2/
+output3/
+output4/
+
+# Python artifacts
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
