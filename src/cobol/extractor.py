@@ -2,7 +2,8 @@
 
 import re
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, List
+from .copybook import CopyStatement
 
 
 @dataclass
@@ -14,13 +15,14 @@ class CobolSections:
     file_section: str = ""
     linkage_section: str = ""
     raw_source: str = ""
+    copy_statements: List[CopyStatement] = field(default_factory=list)
 
     def has_content(self) -> bool:
         """Check if any meaningful content was extracted."""
         return bool(self.working_storage or self.procedure_division)
 
 
-def extract_cobol_sections(source: str) -> CobolSections:
+def extract_cobol_sections(source: str, copy_statements: Optional[List[CopyStatement]] = None) -> CobolSections:
     """
     Extract major COBOL divisions/sections from source code.
 
@@ -30,8 +32,15 @@ def extract_cobol_sections(source: str) -> CobolSections:
     - PROCEDURE DIVISION
     - FILE SECTION
     - LINKAGE SECTION
+
+    Args:
+        source: COBOL source code (should be pre-resolved for COPY statements)
+        copy_statements: Optional list of COPY statements found during resolution
     """
     sections = CobolSections(raw_source=source)
+
+    if copy_statements:
+        sections.copy_statements = copy_statements
 
     # Normalize line endings and remove extra whitespace
     normalized = re.sub(r'\r\n', '\n', source)
@@ -127,6 +136,61 @@ def extract_cobol_sections(source: str) -> CobolSections:
         sections.procedure_division = normalized[proc_start:].strip()
 
     return sections
+
+
+def extract_cobol_sections_with_copybooks(
+    source: str,
+    copybook_paths: List[str],
+    unresolved_handler: str = 'comment'
+) -> CobolSections:
+    """
+    Extract COBOL sections after resolving COPY statements.
+
+    This is the main entry point for Phase 2 - it resolves copybooks first,
+    then extracts sections from the resolved source.
+
+    Args:
+        source: Raw COBOL source code
+        copybook_paths: List of directories to search for copybooks
+        unresolved_handler: How to handle unresolved copybooks ('comment', 'keep', 'error')
+
+    Returns:
+        CobolSections with resolved content and copy statement tracking
+    """
+    from .copybook import resolve_cobol_source
+
+    resolved_source, copy_statements = resolve_cobol_source(
+        source, copybook_paths, unresolved_handler
+    )
+
+    return extract_cobol_sections(resolved_source, copy_statements)
+
+
+def clean_cobol_source(source: str) -> str:
+    """
+    Clean COBOL source by removing comments and normalizing.
+
+    COBOL comments:
+    - * in column 7 (full line comment)
+    - *> inline comment (after column 7)
+    - Floating comment lines starting with *>
+    """
+    lines = source.split('\n')
+    cleaned_lines = []
+
+    for line in lines:
+        # Skip full-line comments (column 7 is *)
+        if len(line) >= 7 and line[6] == '*':
+            continue
+
+        # Remove inline comments (*>)
+        inline_comment_pos = line.find('*>')
+        if inline_comment_pos != -1:
+            line = line[:inline_comment_pos]
+
+        cleaned_lines.append(line.rstrip())
+
+    return '\n'.join(cleaned_lines)
 
 
 def clean_cobol_source(source: str) -> str:

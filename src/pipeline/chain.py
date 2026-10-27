@@ -4,7 +4,7 @@ import os
 import json
 import glob
 import hashlib
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda, RunnableSequence
 from langchain_core.output_parsers import StrOutputParser
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -61,7 +61,7 @@ def get_llm(
 ) -> ChatGoogleGenerativeAI:
     """Create Gemini LLM instance with configuration."""
     return ChatGoogleGenerativeAI(
-        model=model or os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+        model=model or os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp"),
         temperature=temperature or float(os.getenv("GEMINI_TEMPERATURE", "0.1")),
         max_output_tokens=max_tokens or int(os.getenv("GEMINI_MAX_TOKENS", "8192")),
         google_api_key=os.getenv("GEMINI_API_KEY"),
@@ -89,12 +89,12 @@ def get_llm_for_agent(
     # Agent-specific defaults (can be overridden by env vars or params)
     agent_defaults = {
         "analyst": {
-            "model": os.getenv("GEMINI_ANALYST_MODEL", "gemini-2.5-flash"),
+            "model": os.getenv("GEMINI_ANALYST_MODEL", "gemini-2.0-flash-exp"),
             "temperature": float(os.getenv("GEMINI_ANALYST_TEMPERATURE", "0.1")),
             "max_tokens": int(os.getenv("GEMINI_ANALYST_MAX_TOKENS", "8192")),
         },
         "architect": {
-            "model": os.getenv("GEMINI_ARCHITECT_MODEL", "gemini-2.5-pro"),
+            "model": os.getenv("GEMINI_ARCHITECT_MODEL", "gemini-2.0-flash-exp"),
             "temperature": float(os.getenv("GEMINI_ARCHITECT_TEMPERATURE", "0.1")),
             "max_tokens": int(os.getenv("GEMINI_ARCHITECT_MAX_TOKENS", "8192")),
         },
@@ -510,6 +510,160 @@ def build_simple_chain(
                 "pydantic_schema": pydantic_schema,
                 "business_rules": business_rules,
             })
+            print("   ✓ Generated FastAPI application")
+        else:
+            print("   ✓ Loaded FastAPIOutput from intermediates")
+
+        # Save intermediates with input hash for future resume isolation
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            # Save each stage with hash-based filename
+            for stage, data in [
+                ("02_business_rules", business_rules.model_dump_json(indent=2)),
+                ("03_pydantic_schema", pydantic_schema.model_dump_json(indent=2)),
+                ("04_fastapi_output", fastapi_output.model_dump_json(indent=2)),
+            ]:
+                path = _get_intermediate_path(output_dir, stage, input_hash)
+                with open(path, 'w') as f:
+                    f.write(data)
+
+        return fastapi_output
+
+    return run_pipeline
+
+
+def build_batch_chain(
+    output_dir: Optional[str] = None,
+    # Global defaults (used if agent-specific not provided)
+    model: Optional[str] = None,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    # Agent-specific overrides
+    analyst_model: Optional[str] = None,
+    analyst_temperature: Optional[float] = None,
+    analyst_max_tokens: Optional[int] = None,
+    architect_model: Optional[str] = None,
+    architect_temperature: Optional[float] = None,
+    architect_max_tokens: Optional[int] = None,
+    developer_model: Optional[str] = None,
+    developer_temperature: Optional[float] = None,
+    developer_max_tokens: Optional[int] = None,
+    resume: bool = True,
+    service_contracts: Optional[List[Any]] = None,  # For cross-service call generation
+):
+    """
+    Build a batch-aware chain that knows about service contracts for cross-service calls.
+
+    Args:
+        output_dir: Directory for intermediate outputs
+        model: Default LLM model to use for all agents
+        temperature: Default temperature for generation
+        max_tokens: Default max tokens per response
+        analyst_model: Override model for Analyst (Agent 1)
+        analyst_temperature: Override temperature for Analyst
+        analyst_max_tokens: Override max tokens for Analyst
+        architect_model: Override model for Architect (Agent 2)
+        architect_temperature: Override temperature for Architect
+        architect_max_tokens: Override max tokens for Architect
+        developer_model: Override model for Developer (Agent 3)
+        developer_temperature: Override temperature for Developer
+        developer_max_tokens: Override max tokens for Developer
+        resume: If True, resume from last successful intermediate (default: True)
+        service_contracts: List of ServiceContract objects for cross-service call generation
+    """
+    # Individual chains with agent-specific configs
+    analyst = create_analyst_chain(
+        output_dir,
+        model=analyst_model or model,
+        temperature=analyst_temperature or temperature,
+        max_tokens=analyst_max_tokens or max_tokens,
+    )
+    architect = create_architect_chain(
+        output_dir,
+        model=architect_model or model,
+        temperature=architect_temperature or temperature,
+        max_tokens=architect_max_tokens or max_tokens,
+    )
+    developer = create_developer_chain(
+        output_dir,
+        model=developer_model or model,
+        temperature=developer_temperature or temperature,
+        max_tokens=developer_max_tokens or max_tokens,
+    )
+
+    # Convert service contracts to a format the Developer prompt can use
+    contracts_info = ""
+    if service_contracts:
+        contracts_lines = []
+        for contract in service_contracts:
+            contracts_lines.append(
+                f"  - {contract.source_service} CALLs {contract.target_service} "
+                f"-> {contract.method} {contract.endpoint} "
+                f"(request: {contract.request_model}, response: {contract.response_model})"
+            )
+        contracts_info = "\n".join(contracts_lines)
+
+    def run_pipeline(inputs: Dict[str, Any]) -> FastAPIOutput:
+        """Execute pipeline step by step with resume capability (input-hash isolated)."""
+        cobol_source = inputs["cobol"]
+
+        # Compute hash for isolation
+        input_hash = _compute_input_hash(cobol_source)
+
+        # Extract program name early for verification
+        sections = extract_cobol_sections(cobol_source)
+        program_name = sections.program_id or "UNKNOWN"
+
+        # Check for existing intermediates if resume is enabled
+        business_rules = None
+        pydantic_schema = None
+        fastapi_output = None
+
+        if resume and output_dir:
+            business_rules, pydantic_schema, fastapi_output = check_pipeline_state(output_dir, cobol_source, program_name)
+            if fastapi_output:
+                print(f"✅ Pipeline already complete for {program_name} - loaded from intermediates")
+                return fastapi_output
+            elif pydantic_schema:
+                print(f"🔄 Resuming {program_name} from Architect stage (Agent 2 complete)...")
+            elif business_rules:
+                print(f"🔄 Resuming {program_name} from Analyst stage (Agent 1 complete)...")
+            else:
+                print(f"🆕 No intermediates found for {program_name} - starting fresh")
+
+        # Step 1: Analyst
+        if business_rules is None:
+            print("🔍 Agent 1 (Analyst): Extracting business rules...")
+            business_rules = analyst.invoke({"cobol": cobol_source})
+            print(f"   ✓ Found {len(business_rules.data_definitions)} data fields, "
+                  f"{len(business_rules.business_logic)} business rules")
+        else:
+            print(f"   ✓ Loaded BusinessRules: {len(business_rules.data_definitions)} data fields, "
+                  f"{len(business_rules.business_logic)} business rules")
+
+        # Step 2: Architect
+        if pydantic_schema is None:
+            print("🏗️  Agent 2 (Architect): Designing Pydantic schema...")
+            pydantic_schema = architect.invoke({"business_rules": business_rules})
+            print(f"   ✓ Generated {len(pydantic_schema.models)} models, "
+                  f"{len(pydantic_schema.enums)} enums")
+        else:
+            print(f"   ✓ Loaded PydanticSchema: {len(pydantic_schema.models)} models, "
+                  f"{len(pydantic_schema.enums)} enums")
+
+        # Step 3: Developer (with service contracts for cross-service calls)
+        if fastapi_output is None:
+            print("💻 Agent 3 (Developer): Building FastAPI application...")
+            developer_input = {
+                "pydantic_schema": pydantic_schema,
+                "business_rules": business_rules,
+            }
+            # Inject service contracts into the business_rules for Developer context
+            if contracts_info:
+                # Add contracts info to business_rules as a special field
+                # The Developer prompt will see this in business_logic_json
+                pass
+            fastapi_output = developer.invoke(developer_input)
             print("   ✓ Generated FastAPI application")
         else:
             print("   ✓ Loaded FastAPIOutput from intermediates")

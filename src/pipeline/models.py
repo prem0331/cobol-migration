@@ -172,3 +172,27 @@ class FastAPIOutput(BaseModel):
         description="requirements.txt content"
     )
     readme_md: str = Field(default="", description="README.md with API documentation")
+
+
+class ServiceContract(BaseModel):
+    """Service contract for cross-service CALL relationships."""
+    source_service: str = Field(..., description="Service making the CALL")
+    target_service: str = Field(..., description="Service being called")
+    method: str = Field(default="POST", description="HTTP method")
+    endpoint: str = Field(..., description="API endpoint path")
+    request_model: str = Field(..., description="Request model name")
+    response_model: str = Field(..., description="Response model name")
+    description: str = Field(default="", description="Contract description")
+
+
+class SharedModel(BaseModel):
+    """Shared model generated from shared copybooks."""
+    name: str = Field(..., description="Model class name")
+    source_copybooks: List[str] = Field(
+        default_factory=list,
+        description="Copybooks this model was generated from"
+    )
+    fields: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Field definitions"
+    )

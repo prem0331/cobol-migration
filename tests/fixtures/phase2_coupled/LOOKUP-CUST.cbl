@@ -1,0 +1,47 @@
+IDENTIFICATION DIVISION.
+       PROGRAM-ID. LOOKUP-CUST.
+       AUTHOR. INTEGRATION TEST.
+
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT CUSTOMER-FILE
+               ASSIGN TO CUSTMAST
+               ORGANIZATION IS INDEXED
+               ACCESS MODE IS RANDOM
+               RECORD KEY IS CUST-ID
+               FILE STATUS IS WS-FILE-STATUS.
+
+       DATA DIVISION.
+       FILE SECTION.
+       FD CUSTOMER-FILE.
+           COPY CUSTOMER-REC.
+
+       WORKING-STORAGE SECTION.
+           COPY CUSTOMER-REC REPLACING CUSTOMER-RECORD BY WS-CUSTOMER-RECORD.
+
+       LINKAGE SECTION.
+       01  LS-CUSTOMER-RECORD.
+           COPY CUSTOMER-REC REPLACING CUSTOMER-RECORD BY LS-CUSTOMER-RECORD.
+
+       01  WS-FILE-STATUS        PIC XX.
+
+       PROCEDURE DIVISION USING LS-CUSTOMER-RECORD.
+       MAIN-PARA.
+           * Open file for I-O
+           OPEN I-O CUSTOMER-FILE.
+           IF WS-FILE-STATUS NOT = "00"
+               DISPLAY "Error opening file: " WS-FILE-STATUS
+               GOBACK
+           END-IF.
+
+           * Read customer record by key
+           READ CUSTOMER-FILE INTO LS-CUSTOMER-RECORD
+               KEY IS CUST-ID OF LS-CUSTOMER-RECORD
+               INVALID KEY
+                   MOVE "23" TO WS-FILE-STATUS
+                   MOVE "Customer not found" TO CUST-NAME OF LS-CUSTOMER-RECORD
+           END-READ.
+
+           CLOSE CUSTOMER-FILE.
+           GOBACK.

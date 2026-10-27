@@ -2,6 +2,7 @@
 
 import os
 import sys
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -10,11 +11,25 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.syntax import Syntax
+from rich.table import Table
 from dotenv import load_dotenv
 
 from .chain import build_simple_chain
 from .models import FastAPIOutput
 from ..cobol.extractor import extract_cobol_sections
+from ..cobol.discovery import discover_all, filter_cobol_programs
+from .system_graph import build_system_graph, DependencyGraph
+from .planner import (
+    create_migration_plan,
+    save_migration_plan,
+    load_migration_plan,
+    MigrationStrategy,
+)
+from .batch_runner import (
+    run_batch_migration_with_resume,
+    print_batch_summary,
+    save_batch_report,
+)
 
 app = typer.Typer(
     name="cobol2fastapi",
@@ -298,6 +313,392 @@ def test_gemini(
     except Exception as e:
         console.print(f"[red]Failed: {e}[/red]")
         sys.exit(1)
+
+
+@app.command()
+def status(
+    output_dir: str = typer.Argument("./output", help="Output directory to check"),
+):
+    """Check pipeline state from intermediate files."""
+    from pathlib import Path
+    import json
+    from datetime import datetime
+
+    intermediates_dir = Path(output_dir) / "intermediates"
+    if not intermediates_dir.exists():
+        console.print(f"[yellow]No intermediates directory found at {intermediates_dir}[/yellow]")
+        return
+
+    console.print(Panel.fit(
+        f"[bold]Pipeline Status: {output_dir}[/bold]",
+        border_style="blue"
+    ))
+
+    stages = [
+        ("01_extracted_sections", "Section Extraction"),
+        ("02_business_rules", "Agent 1: Analyst (Business Rules)"),
+        ("03_pydantic_schema", "Agent 2: Architect (Pydantic Schema)"),
+        ("04_fastapi_output", "Agent 3: Developer (FastAPI App)"),
+    ]
+
+    for prefix, label in stages:
+        pattern = str(intermediates_dir / f"{prefix}_*.json")
+        files = list(Path(intermediates_dir).glob(f"{prefix}_*.json"))
+        if files:
+            latest = max(files, key=lambda f: f.stat().st_mtime)
+            mtime = datetime.fromtimestamp(latest.stat().st_mtime)
+            size = latest.stat().st_size
+            console.print(f"  [green]✓[/green] {label}: {latest.name} ({size} bytes, {mtime.strftime('%Y-%m-%d %H:%M:%S')})")
+        else:
+            console.print(f"  [red]✗[/red] {label}: Not found")
+
+
+@app.command()
+def clear_intermediates(
+    output_dir: str = typer.Argument("./output", help="Output directory"),
+    confirm: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation"),
+):
+    """Delete all intermediate files to force fresh pipeline run."""
+    from pathlib import Path
+
+    intermediates_dir = Path(output_dir) / "intermediates"
+    if not intermediates_dir.exists():
+        console.print(f"[yellow]No intermediates directory found at {intermediates_dir}[/yellow]")
+        return
+
+    files = list(intermediates_dir.glob("*.json"))
+    if not files:
+        console.print("[yellow]No intermediate files to clear[/yellow]")
+        return
+
+    if not confirm:
+        console.print(f"Found {len(files)} intermediate files in {intermediates_dir}")
+        if not typer.confirm("Delete all intermediate files?"):
+            console.print("Cancelled")
+            return
+
+    for f in files:
+        f.unlink()
+        console.print(f"  [red]Deleted[/red] {f.name}")
+
+    console.print("[green]All intermediate files cleared[/green]")
+
+
+@app.command()
+def discover(
+    source_dir: str = typer.Argument(".", help="Directory to scan for COBOL files"),
+    copybook_dirs: Optional[str] = typer.Option(None, "--copybook-dirs", "-c", help="Comma-separated copybook directories"),
+):
+    """Discover COBOL files and copybooks in a directory."""
+    load_environment()
+
+    copybook_paths = []
+    if copybook_dirs:
+        copybook_paths = [p.strip() for p in copybook_dirs.split(",")]
+
+    console.print(Panel.fit(
+        f"[bold]COBOL Discovery[/bold]\n"
+        f"Source: {source_dir}\n"
+        f"Copybook dirs: {copybook_paths or 'auto'}",
+        border_style="blue"
+    ))
+
+    with console.status("Scanning..."):
+        inventory = discover_all(source_dir, copybook_paths)
+
+    files = inventory.get('files', [])
+    copybooks = inventory.get('copybooks', {})
+
+    console.print(f"\n[bold]Found {len(files)} COBOL programs:[/bold]")
+    table = Table()
+    table.add_column("Program ID", style="cyan")
+    table.add_column("File", style="green")
+
+    for prog in files:
+        table.add_row(prog.program_id or "UNKNOWN", prog.path)
+
+    console.print(table)
+
+    console.print(f"\n[bold]Found {len(copybooks)} copybooks:[/bold]")
+    for cb in copybooks.values():
+        console.print(f"  [cyan]{cb.name}[/cyan] -> {cb.path}")
+
+
+@app.command()
+def graph(
+    source_dir: str = typer.Argument(".", help="Directory with COBOL files"),
+    output: str = typer.Option("./dependency-graph.json", "-o", "--output", help="Output JSON file"),
+    copybook_dirs: Optional[str] = typer.Option(None, "--copybook-dirs", "-c", help="Comma-separated copybook directories"),
+    format: str = typer.Option("json", "--format", "-f", help="Output format: json, summary, mermaid, neo4j"),
+):
+    """Build and display system dependency graph."""
+    load_environment()
+
+    copybook_paths = []
+    if copybook_dirs:
+        copybook_paths = [p.strip() for p in copybook_dirs.split(",")]
+
+    # Discover programs
+    inventory = discover_all(source_dir, copybook_paths)
+    programs = filter_cobol_programs(inventory['files'])
+
+    # Read source code
+    program_sources = {}
+    for prog in programs:
+        program_sources[prog.program_id] = Path(prog.path).read_text(encoding="utf-8")
+
+    # Build graph
+    console.print(f"Building dependency graph for {len(program_sources)} programs...")
+    graph = build_system_graph(program_sources, copybook_paths)
+
+    if format == "summary":
+        # Print summary
+        console.print(Panel.fit(
+            f"[bold]Dependency Graph Summary[/bold]\n"
+            f"Programs: {len(graph.programs)}\n"
+            f"Copybooks: {len(graph.copybooks)}\n"
+            f"Files: {len(graph.files)}\n"
+            f"Edges: {len(graph.edges)}",
+            border_style="green"
+        ))
+
+        console.print("\n[bold]Entry Points:[/bold]")
+        for ep in graph.get_entry_points():
+            console.print(f"  {ep}")
+
+        console.print("\n[bold]Leaf Programs:[/bold]")
+        for lp in graph.get_leaf_programs():
+            console.print(f"  {lp}")
+
+        cycles = graph.find_circular_calls()
+        if cycles:
+            console.print("\n[red]Circular Dependencies:[/red]")
+            for cycle in cycles:
+                console.print(f"  {' -> '.join(cycle)}")
+
+        # Unresolved dynamic calls
+        unresolved = []
+        for prog_node in graph.programs.values():
+            for dyn in prog_node.unresolved_dynamic_calls:
+                unresolved.append(f"{prog_node.name}: {dyn['variable']} at {dyn['paragraph']}:{dyn['line_number']}")
+        if unresolved:
+            console.print("\n[yellow]Unresolved Dynamic CALLs:[/yellow]")
+            for u in unresolved:
+                console.print(f"  {u}")
+    elif format == "mermaid":
+        # Output Mermaid diagram
+        mermaid = graph.to_mermaid()
+        if output.endswith(".mmd") or output.endswith(".mermaid"):
+            Path(output).write_text(mermaid, encoding="utf-8")
+            console.print(f"[green]Mermaid diagram saved to {output}[/green]")
+        else:
+            console.print(mermaid)
+    elif format == "neo4j":
+        # Output Neo4j Cypher
+        cypher = graph.to_neo4j_cypher()
+        if output.endswith(".cypher") or output.endswith(".cql"):
+            Path(output).write_text(cypher, encoding="utf-8")
+            console.print(f"[green]Neo4j Cypher saved to {output}[/green]")
+        else:
+            console.print(cypher)
+    else:
+        # Save full JSON
+        graph.serialize(output)
+        console.print(f"[green]Graph saved to {output}[/green]")
+
+
+@app.command()
+def plan(
+    source_dir: str = typer.Argument(".", help="Directory with COBOL files"),
+    output: str = typer.Option("./migration-plan.json", "-o", "--output", help="Output JSON file"),
+    copybook_dirs: Optional[str] = typer.Option(None, "--copybook-dirs", "-c", help="Comma-separated copybook directories"),
+    strategy: str = typer.Option("grouped", "--strategy", "-s", help="Migration strategy: independent, grouped, hybrid"),
+    max_group_size: int = typer.Option(5, "--max-group-size", help="Maximum programs per group"),
+):
+    """Generate migration plan from COBOL codebase."""
+    load_environment()
+
+    copybook_paths = []
+    if copybook_dirs:
+        copybook_paths = [p.strip() for p in copybook_dirs.split(",")]
+
+    # Discover programs
+    inventory = discover_all(source_dir, copybook_paths)
+    programs = filter_cobol_programs(inventory['files'])
+
+    # Read source code
+    program_sources = {}
+    for prog in programs:
+        program_sources[prog.program_id] = Path(prog.path).read_text(encoding="utf-8")
+
+    # Build graph and plan
+    console.print(f"Analyzing {len(program_sources)} programs...")
+    graph = build_system_graph(program_sources, copybook_paths)
+
+    mig_strategy = MigrationStrategy(strategy)
+    plan = create_migration_plan(graph, mig_strategy, max_group_size)
+
+    # Save plan
+    save_migration_plan(plan, output)
+    console.print(f"[green]Migration plan saved to {output}[/green]")
+
+    # Print summary
+    console.print(Panel.fit(
+        f"[bold]Migration Plan[/bold]\n"
+        f"Strategy: {plan.strategy.value}\n"
+        f"Groups: {len(plan.groups)}\n"
+        f"Shared Models: {len(plan.shared_models)}\n"
+        f"Service Contracts: {len(plan.service_contracts)}\n"
+        f"Unresolved: {len(plan.unresolved)}",
+        border_style="green"
+    ))
+
+    console.print("\n[bold]Groups:[/bold]")
+    for group in plan.groups:
+        console.print(f"  [cyan]{group.name}[/cyan]: {', '.join(group.programs)}")
+        if group.shared_copybooks:
+            console.print(f"    Shared copybooks: {', '.join(group.shared_copybooks)}")
+        if group.shared_files:
+            console.print(f"    Shared files: {', '.join(group.shared_files)}")
+
+    if plan.unresolved:
+        console.print("\n[yellow]Unresolved Items:[/yellow]")
+        for u in plan.unresolved:
+            console.print(f"  - {u}")
+
+
+@app.command()
+def batch(
+    source_dir: str = typer.Argument(".", help="Directory with COBOL files"),
+    output: str = typer.Option("./batch-output", "-o", "--output", help="Output base directory"),
+    copybook_dirs: Optional[str] = typer.Option(None, "--copybook-dirs", "-c", help="Comma-separated copybook directories"),
+    strategy: str = typer.Option("grouped", "--strategy", "-s", help="Migration strategy: independent, grouped, hybrid"),
+    max_group_size: int = typer.Option(5, "--max-group-size", help="Maximum programs per group"),
+    plan_file: Optional[str] = typer.Option(None, "--plan", "-p", help="Use existing migration plan file"),
+    fresh: bool = typer.Option(False, "--fresh", help="Force fresh migration (ignore existing)"),
+    validate: bool = typer.Option(True, "--validate/--no-validate", help="Validate generated code"),
+    # Global defaults
+    model: Optional[str] = typer.Option(None, "-m", "--model", help="Default Gemini model for all agents"),
+    temperature: Optional[float] = typer.Option(None, "-t", "--temperature", help="Default temperature for all agents"),
+    max_tokens: Optional[int] = typer.Option(None, "--max-tokens", help="Default max tokens per response"),
+    # Agent-specific overrides
+    analyst_model: Optional[str] = typer.Option(None, "--analyst-model", help="Model for Agent 1 (Analyst)"),
+    analyst_temperature: Optional[float] = typer.Option(None, "--analyst-temp", help="Temperature for Analyst"),
+    architect_model: Optional[str] = typer.Option(None, "--architect-model", help="Model for Agent 2 (Architect)"),
+    architect_temperature: Optional[float] = typer.Option(None, "--architect-temp", help="Temperature for Architect"),
+    developer_model: Optional[str] = typer.Option(None, "--developer-model", help="Model for Agent 3 (Developer)"),
+    developer_temperature: Optional[float] = typer.Option(None, "--developer-temp", help="Temperature for Developer"),
+):
+    """Run batch migration for multiple COBOL programs."""
+    load_environment()
+
+    if not os.getenv("GEMINI_API_KEY"):
+        console.print("[red]Error: GEMINI_API_KEY not found in environment[/red]")
+        sys.exit(1)
+
+    copybook_paths = []
+    if copybook_dirs:
+        copybook_paths = [p.strip() for p in copybook_dirs.split(",")]
+
+    # Discover programs
+    inventory = discover_all(source_dir, copybook_paths)
+    programs = filter_cobol_programs(inventory['files'])
+
+    # Read source code
+    program_sources = {}
+    for prog in programs:
+        program_sources[prog.program_id] = Path(prog.path).read_text(encoding="utf-8")
+
+    console.print(Panel.fit(
+        f"[bold]Batch Migration[/bold]\n"
+        f"Programs: {len(program_sources)}\n"
+        f"Output: {output}\n"
+        f"Strategy: {strategy}",
+        border_style="blue"
+    ))
+
+    # Load or create plan
+    output_path = Path(output)
+    if plan_file and Path(plan_file).exists():
+        plan = load_migration_plan(plan_file)
+        console.print(f"[green]Loaded plan from {plan_file}[/green]")
+    else:
+        console.print("Building dependency graph and creating plan...")
+        graph = build_system_graph(program_sources, copybook_paths)
+        mig_strategy = MigrationStrategy(strategy)
+        plan = create_migration_plan(graph, mig_strategy, max_group_size)
+
+        # Ensure output directory exists
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        # Save plan for reference
+        plan_path = output_path / "migration-plan.json"
+        save_migration_plan(plan, str(plan_path))
+        console.print(f"[green]Plan saved to {plan_path}[/green]")
+
+    # Configure pipeline
+    config = {
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "analyst_model": analyst_model,
+        "analyst_temperature": analyst_temperature,
+        "architect_model": architect_model,
+        "architect_temperature": architect_temperature,
+        "developer_model": developer_model,
+        "developer_temperature": developer_temperature,
+        "resume": not fresh,
+    }
+
+    # Load copybook sources for shared model generation
+    copybook_sources = {}
+    for cb_path in copybook_paths:
+        cb_dir = Path(cb_path)
+        if cb_dir.exists():
+            for cb_file in cb_dir.glob("*.cpy"):
+                copybook_sources[cb_file.stem] = cb_file.read_text(encoding="utf-8")
+            for cb_file in cb_dir.glob("*.copy"):
+                copybook_sources[cb_file.stem] = cb_file.read_text(encoding="utf-8")
+            for cb_file in cb_dir.glob("*.cbl"):
+                copybook_sources[cb_file.stem] = cb_file.read_text(encoding="utf-8")
+
+    # Run batch migration
+    console.print(f"\n[bold]Starting batch migration ({'fresh' if fresh else 'resume'} mode)...[/bold]\n")
+    result = run_batch_migration_with_resume(program_sources, plan, output_path, config)
+
+    # Generate shared models
+    from .batch_runner import generate_shared_models_code, write_shared_models, generate_service_contracts_code
+    shared_models = generate_shared_models_code(plan, output_path, copybook_sources)
+    if shared_models:
+        write_shared_models(shared_models, output_path)
+        console.print(f"[green]Generated {len(shared_models)} shared models[/green]")
+
+    # Generate service contracts
+    generate_service_contracts_code(plan, output_path)
+    console.print(f"[green]Generated service contracts[/green]")
+
+    # Print summary
+    print_batch_summary(result, plan)
+
+    # Save report
+    save_batch_report(result, plan, output_path)
+
+    # Validate if requested
+    if validate:
+        console.print("\n[bold]Validating generated code...[/bold]")
+        all_valid = True
+        for group in plan.groups:
+            group_dir = output_path / group.name
+            if not validate_generated_code(group_dir):
+                all_valid = False
+                console.print(f"  [red]✗[/red] {group.name} has syntax errors")
+            else:
+                console.print(f"  [green]✓[/green] {group.name} syntax OK")
+
+        if all_valid:
+            console.print("[green]All services passed syntax validation![/green]")
+        else:
+            console.print("[yellow]Some services have syntax errors[/yellow]")
 
 
 @app.command()
