@@ -1,4 +1,3 @@
-
 # Secrets
 .env
 .env.*
@@ -6,12 +5,27 @@
 # Keep the example environment template
 !.env.example
 
-# Generated migration outputs
+# Keep generated migration outputs (these are the main deliverables)
+!migration-output/
+!frontend-output-new/
+
+# Exclude all other generated outputs
 output/
 output_test/
 output2/
 output3/
 output4/
+batch-output/
+phase2_output/
+phase2_coupled_output/
+examples_output/
+frontend-output/
+dependency-graph.json
+migration-plan.json
+generate_frontend.py
+test_regex.py
+unseen/
+unseen_output/
 
 # Python artifacts
 .venv/
@@ -21,3 +35,13 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# IDE/OS artifacts
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Test fixtures (if they get large)
+tests/equivalence/
+tests/golden/

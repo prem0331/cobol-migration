@@ -196,3 +196,12 @@ class SharedModel(BaseModel):
         default_factory=list,
         description="Field definitions"
     )
+
+
+class FrontendOutput(BaseModel):
+    """Complete HTML/CSS/JS frontend application output by Agent 4 (Frontend Generator)."""
+    index_html: str = Field(..., description="index.html - Main entry point with all HTML structure")
+    style_css: str = Field(..., description="style.css - All styles")
+    app_js: str = Field(..., description="app.js - Main JavaScript application logic")
+    api_client_js: str = Field(..., description="api-client.js - API client for backend communication")
+    readme_md: str = Field(default="", description="README.md with setup instructions")

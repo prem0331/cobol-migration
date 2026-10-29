@@ -4,7 +4,7 @@ import os
 import sys
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 import typer
 from rich.console import Console
@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 
 from .chain import build_simple_chain
 from .models import FastAPIOutput
+from .frontend_chain import run_frontend_generation, write_frontend_files
 from ..cobol.extractor import extract_cobol_sections
 from ..cobol.discovery import discover_all, filter_cobol_programs
 from .system_graph import build_system_graph, DependencyGraph
@@ -768,6 +769,95 @@ def clear_intermediates(
         console.print(f"  [red]Deleted[/red] {f.name}")
 
     console.print("[green]All intermediate files cleared[/green]")
+
+
+@app.command()
+def frontend(
+    service_dirs: List[str] = typer.Argument(..., help="Paths to generated FastAPI service directories"),
+    output_dir: str = typer.Option("./frontend-output", "-o", "--output", help="Output directory for generated frontend"),
+    contracts_dir: Optional[str] = typer.Option(None, "-c", "--contracts", help="Path to contracts directory"),
+    plan_file: Optional[str] = typer.Option(None, "-p", "--plan", help="Path to migration plan file"),
+    env_file: Optional[str] = typer.Option(None, "-e", "--env", help="Path to .env file with GEMINI_API_KEY"),
+    model: Optional[str] = typer.Option(None, "-m", "--model", help="Gemini model for frontend generation"),
+    temperature: Optional[float] = typer.Option(None, "-t", "--temperature", help="Temperature (0.0-1.0)"),
+    max_tokens: Optional[int] = typer.Option(None, "--max-tokens", help="Max tokens per response"),
+):
+    """
+    Generate vanilla HTML/CSS/JS frontend from FastAPI service OpenAPI specs.
+
+    Example:
+        cobol2fastapi frontend ./migration-output/group-0 ./migration-output/group-1 -o ./frontend-output
+        cobol2fastapi frontend ./migration-output/group-0 -o ./frontend-output --contracts ./migration-output/contracts --plan ./migration-output/migration-plan.json
+    """
+    # Load environment
+    load_environment(env_file)
+
+    # Check API key
+    if not os.getenv("GEMINI_API_KEY"):
+        console.print("[red]Error: GEMINI_API_KEY not found in environment[/red]")
+        console.print("Create a .env file with your Gemini API key (see .env.example)")
+        sys.exit(1)
+
+    # Validate service directories
+    valid_dirs = []
+    for d in service_dirs:
+        path = Path(d)
+        if path.exists() and (path / "main.py").exists():
+            valid_dirs.append(str(path))
+        else:
+            console.print(f"[yellow]Warning: Service directory not found or missing main.py: {d}[/yellow]")
+
+    if not valid_dirs:
+        console.print("[red]Error: No valid service directories found[/red]")
+        sys.exit(1)
+
+    console.print(Panel.fit(
+        f"[bold]Frontend Generator (Agent 4)[/bold]\n"
+        f"Services: {len(valid_dirs)}\n"
+        f"Output: {output_dir}",
+        border_style="blue"
+    ))
+
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+            transient=True,
+        ) as progress:
+            task = progress.add_task("Generating vanilla HTML/CSS/JS frontend...", total=None)
+            frontend_output = run_frontend_generation(
+                service_dirs=valid_dirs,
+                output_dir=output_dir,
+                contracts_dir=contracts_dir,
+                plan_file=plan_file,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            progress.update(task, completed=True)
+
+    except Exception as e:
+        console.print(f"\n[red]Frontend generation failed: {e}[/red]")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    # Write output files
+    console.print("\n[bold]Writing generated frontend files...[/bold]")
+    write_frontend_files(output_dir, frontend_output)
+
+    # Summary
+    console.print(Panel.fit(
+        f"[bold green]Frontend Generation Complete![/bold green]\n\n"
+        f"Generated vanilla HTML/CSS/JS application in: [cyan]{output_dir}[/cyan]\n\n"
+        f"To run the frontend:\n"
+        f"  cd {output_dir}\n"
+        f"  python3 -m http.server 3000\n\n"
+        f"Frontend will be at: http://localhost:3000\n"
+        f"Ensure FastAPI backend services are running on their respective ports",
+        border_style="green"
+    ))
 
 
 if __name__ == "__main__":

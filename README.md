@@ -1,6 +1,6 @@
 # COBOL to FastAPI Migration Pipeline
 
-A multi-agent pipeline (Analyst → Architect → Developer) that converts COBOL programs to FastAPI microservices using LLMs via LangChain LCEL. **Phase 2 adds batch processing, copybook resolution, CALL graph analysis, dependency graphs, and migration planning.**
+A multi-agent pipeline (Analyst → Architect → Developer → **Frontend Generator**) that converts COBOL programs to FastAPI microservices **and vanilla HTML/CSS/JS frontend applications** using LLMs via LangChain LCEL. **Phase 2 adds batch processing, copybook resolution, CALL graph analysis, dependency graphs, and migration planning. Phase 3 adds frontend generation from OpenAPI specs.**
 
 ## Architecture
 
@@ -58,11 +58,36 @@ A multi-agent pipeline (Analyst → Architect → Developer) that converts COBOL
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
+### Phase 3: Frontend Generation (NEW)
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        PHASE 3 PIPELINE                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌──────────────┐    ┌────────────────┐    ┌────────────────────────────┐  │
+│  │ Service      │    │ OpenAPI Spec   │    │ Frontend Generator         │  │
+│  │ Directories  │───▶│ Extraction     │───▶│ (Agent 4)                  │  │
+│  │ (group-0,    │    │ (from main.py) │    │                            │  │
+│  │  group-1,    │    │ + Merging      │    │ Generates:                 │  │
+│  │  ...)        │    └────────────────┘    │  - index.html              │  │
+│  └──────────────┘                          │  - style.css               │  │
+│                                            │  - app.js                  │  │
+│  ┌──────────────┐                          │  - api-client.js           │  │
+│  │ Service      │                          │  - README.md               │  │
+│  │ Contracts    │                          │                            │  │
+│  │ (contracts/  │                          │ Tech Stack:                │  │
+│  │  *.json)     │                          │  - Vanilla HTML5/CSS3/ES6+ │  │
+│  └──────────────┘                          │  - No frameworks, no build │  │
+│                                            │  - Fetch API for backend   │  │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
 ### Agent Roles
 
 1. **Analyst** - Reads COBOL, extracts structured business rules (data definitions, logic, I/O)
 2. **Architect** - Converts business rules to Pydantic models with proper types, enums, validation
 3. **Developer** - Generates complete FastAPI application (routes, services, models, main)
+4. **Frontend Generator (Agent 4)** - Generates vanilla HTML/CSS/JS frontend from OpenAPI specs with multi-service API client
 
 ---
 
@@ -109,7 +134,8 @@ python -m src.pipeline.runner test-gemini
 python -m src.pipeline.runner graph tests/fixtures/phase2_coupled -o ./output/graph.json
 
 # View migration plan
-python -m src.pipeline.runner plan tests/fixtures/phase2_coupled -o ./output/plan.json
+python 
+-m src.pipeline.runner plan tests/fixtures/phase2_coupled -o ./output/plan.json
 
 # Run batch migration with grouped strategy
 python -m src.pipeline.runner batch tests/fixtures/phase2_coupled \
@@ -181,6 +207,12 @@ GEMINI_ARCHITECT_MAX_TOKENS=8192
 GEMINI_DEVELOPER_MODEL=gemini-2.0-flash-exp
 GEMINI_DEVELOPER_TEMPERATURE=0.1
 GEMINI_DEVELOPER_MAX_TOKENS=32768
+
+# Agent 4: FRONTEND GENERATOR - HTML/CSS/JS code generation
+# Use model with large output capacity for complete frontend
+GEMINI_FRONTEND_MODEL=gemini-flash-lite-latest
+GEMINI_FRONTEND_TEMPERATURE=0.1
+GEMINI_FRONTEND_MAX_TOKENS=32768
 ```
 
 ---
@@ -208,6 +240,15 @@ GEMINI_DEVELOPER_MAX_TOKENS=32768
 - ✅ **Shared Pydantic models** - Generated from shared copybooks
 - ✅ **Service contracts** - OpenAPI specs + client stubs for CALL relationships
 
+### Phase 3 (Frontend Generation) - ✅ Implemented
+- ✅ **OpenAPI spec extraction** - Loads and merges specs from multiple FastAPI services
+- ✅ **Multi-service API client** - Generates `api-client.js` with `SERVICE_CONFIG` mapping tags to base URLs
+- ✅ **Dynamic UI generation** - Creates forms, tables, modals for ALL endpoints from OpenAPI
+- ✅ **Hash-based routing** - Single-page application with sidebar navigation grouped by service/tag
+- ✅ **Toast notifications** - Success/error/warning feedback
+- ✅ **Responsive design** - Mobile-first CSS with CSS variables, Flexbox/Grid
+- ✅ **Vanilla tech stack** - No frameworks, no build tools, no Node.js required
+
 ### Not Yet Supported
 - ❌ COPY ... REPLACING
 - ❌ Dynamic CALL (CALL variable-name)
@@ -226,13 +267,15 @@ cobol/
 │   ├── pipeline/                    # Multi-agent pipeline
 │   │   ├── __init__.py
 │   │   ├── chain.py                 # LCEL chain composition (simple + batch)
-│   │   ├── models.py                # Pydantic models (BusinessRules, FastAPIOutput, ServiceContract, SharedModel)
+│   │   ├── models.py                # Pydantic models (BusinessRules, FastAPIOutput, ServiceContract, SharedModel, FrontendOutput)
 │   │   ├── prompts.py               # Prompt templates for each agent
 │   │   ├── parsers.py               # Output parsers with validation
-│   │   ├── runner.py                # CLI entry point (migrate, batch, graph, plan, test-gemini)
+│   │   ├── runner.py                # CLI entry point (migrate, batch, graph, plan, test-gemini, frontend)
 │   │   ├── system_graph.py          # Dependency graph builder (NEW)
 │   │   ├── planner.py               # Migration planner (NEW)
-│   │   └── batch_runner.py          # Batch orchestration (NEW)
+│   │   ├── batch_runner.py          # Batch orchestration (NEW)
+│   │   ├── frontend_chain.py        # Agent 4: Frontend Generator (NEW)
+│   │   └── frontend_prompts.py      # Agent 4 prompts (NEW)
 │   ├── cobol/                       # COBOL parsing & analysis
 │   │   ├── __init__.py
 │   │   ├── extractor.py             # Section extraction (regex-based)
@@ -254,6 +297,12 @@ cobol/
 │   └── fixtures/
 │       ├── phase2/                  # Test fixtures for Phase 2
 │       └── phase2_coupled/          # Coupled programs with CALL/COPY
+├── src/testing/                     # Testing utilities (NEW)
+│   ├── __init__.py
+│   ├── cobol_simulator.py           # COBOL logic simulator
+│   ├── equivalence_runner.py        # Golden-file equivalence runner
+│   ├── golden_test.py               # Golden test utilities
+│   └── test_case_generator.py       # Auto-generates test cases from business rules
 ├── examples/
 │   ├── sample.cbl                   # Simple sample
 │   ├── inventory.cbl
@@ -382,6 +431,32 @@ cobol2fastapi migrate input.cbl -o ./output \
   --developer-temp 0.1
 ```
 
+### Phase 3: Frontend Generation (NEW)
+```bash
+# Generate vanilla HTML/CSS/JS frontend from multiple FastAPI services
+cobol2fastapi frontend ./migration-output/group-0 ./migration-output/group-1 \
+  -o ./frontend-output \
+  --contracts ./migration-output/contracts \
+  --plan ./migration-output/migration-plan.json
+
+# Or with custom model settings
+cobol2fastapi frontend ./migration-output/group-0 ./migration-output/group-1 \
+  -o ./frontend-output \
+  --model gemini-flash-lite-latest \
+  --temperature 0.1 \
+  --max-tokens 32768
+```
+
+### Run the Generated Frontend
+```bash
+# Serve the frontend (no build step needed!)
+cd frontend-output
+python3 -m http.server 3000
+
+# Frontend available at http://localhost:3000
+# Ensure backend services are running on their respective ports (e.g., 8000, 8001)
+```
+
 ---
 
 ## Generated Output Structure
@@ -427,6 +502,16 @@ migration-output/
 │       └── VALIDATE-CUST/
 └── group-1/                      # Service group 2 (independent)
     └── ...
+```
+
+### Phase 3 (Frontend Generation)
+```
+frontend-output/
+├── index.html              # Main entry point with sidebar nav, header, modal, toasts
+├── style.css               # Complete styling with CSS variables, responsive design
+├── app.js                  # Main application logic (routing, state, handlers for ALL endpoints)
+├── api-client.js           # Multi-service API client with SERVICE_CONFIG
+└── README.md               # Setup instructions
 ```
 
 ---
@@ -679,6 +764,12 @@ pytest --cov=src
 
 # Run semantic equivalence tests (requires COBOL simulator)
 pytest tests/test_equivalence.py -v
+
+# Generate golden files from COBOL simulator
+python -m src.testing.equivalence_runner --service-dir ./migration-output/group-0 --program CUSTOMER-MAIN --create-golden
+python -m src.testing.equivalence_runner --service-dir ./migration-output/group-0 --program VALIDATE-CUST --create-golden
+python -m src.testing.equivalence_runner --service-dir ./migration-output/group-0 --program LOOKUP-CUST --create-golden
+python -m src.testing.equivalence_runner --service-dir ./migration-output/group-1 --program REPORT-MAIN --create-golden
 ```
 
 ### Code Quality
@@ -722,6 +813,20 @@ Generates:
 - `routes.py` - RESTful endpoints with validation, pagination, proper HTTP codes
 - `requirements.txt` - Pinned dependencies
 - `README.md` - API documentation with examples
+
+### Agent 4: Frontend Generator Prompt
+Generates:
+- `index.html` - Complete HTML5 document with semantic structure, sidebar nav, modal, toast container
+- `style.css` - CSS variables for theming, responsive sidebar, table/form/modal/toast styles
+- `app.js` - Hash-based router, dynamic form/table generation, CRUD handlers for ALL endpoints, pagination, search/filter
+- `api-client.js` - `SERVICE_CONFIG` mapping tags→base URLs, `ApiClient` class with per-service URL resolution, wrapper methods for every endpoint
+- `README.md` - Setup instructions with multi-service configuration
+
+Key features:
+- **Multi-service support**: Groups endpoints by OpenAPI tag, each tag maps to a service base URL
+- **Dynamic UI**: Forms generated from request schemas, tables from response schemas
+- **Full CRUD**: Create (modal), Read (table + detail modal), Update (modal), Delete (confirmation)
+- **COBOL-specific actions**: Execute workflows (RUN-MAIN), inspect working storage
 
 ### Hash-Based Resume
 Each program's COBOL source is hashed (SHA256, 16 chars). Intermediate outputs keyed by hash:
@@ -831,14 +936,23 @@ MIT
 
 ## Roadmap
 
-### Phase 3 (Future)
-- [ ] Semantic equivalence testing (COBOL simulator ↔ FastAPI)
-- [ ] CICS/BMS screen mapping to React/Vue frontends
+### Phase 3 (Frontend Generation) - ✅ COMPLETE
+- [x] OpenAPI spec extraction and merging from multiple services
+- [x] Vanilla HTML/CSS/JS frontend generation (no frameworks)
+- [x] Multi-service API client with SERVICE_CONFIG
+- [x] Dynamic UI for ALL endpoints (forms, tables, modals)
+- [x] Hash-based routing with sidebar navigation
+- [x] Toast notifications and loading states
+
+### Phase 4 (Future)
+- [ ] Semantic equivalence testing (COBOL simulator ↔ FastAPI) - full coverage
+- [ ] CICS/BMS screen mapping to vanilla HTML/CSS/JS frontends
 - [ ] Embedded SQL → SQLAlchemy models
 - [ ] Dynamic CALL resolution
 - [ ] COPY REPLACING support
 - [ ] Performance optimization (parallel batch execution)
 - [ ] Web UI for migration management
+- [ ] Runtime OpenAPI renderer (generic app.js reading OpenAPI at runtime)
 
 ### Parser Upgrade Path (Post-MVP)
 Current implementation uses **regex-based parsing** which handles ~80% of typical COBOL. For production use, consider:
